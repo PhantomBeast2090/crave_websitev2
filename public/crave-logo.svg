@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 180" role="img" aria-labelledby="title desc">
+  <title id="title">Crave wordmark</title>
+  <desc id="desc">Crave campus food wordmark with a playful fork-like C</desc>
+  <rect width="720" height="180" rx="34" fill="#f5f1ea"/>
+  <g fill="#1c1b1a" font-family="Arial, sans-serif" font-weight="800" letter-spacing="-16">
+    <text x="106" y="128" font-size="115">RAVE</text>
+  </g>
+  <path d="M110 48c-28-26-72-22-92 6-20 29-8 71 24 85 32 14 69-1 80-32 5-14 3-29-5-42-6-10-16-17-27-19-18-3-34 8-38 25-4 19 9 35 27 38 14 2 27-6 31-19" fill="none" stroke="#1c1b1a" stroke-width="16" stroke-linecap="round"/>
+  <path d="M66 84h35M84 66v35" stroke="#ff5c35" stroke-width="10" stroke-linecap="round"/>
+  <path d="M621 28l8 18 20 3-14 14 3 20-17-10-18 10 4-20-15-14 20-3z" fill="#ff5c35"/>
+</svg>
