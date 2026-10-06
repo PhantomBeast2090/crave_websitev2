@@ -1,0 +1,15 @@
+# Minimal config so `supabase functions deploy` applies the right JWT policy per function.
+project_id = "btdmhveaqssuuhyoyanz"
+
+[functions.create-razorpay-order]
+verify_jwt = true
+
+[functions.verify-razorpay-payment]
+verify_jwt = true
+
+[functions.refund-razorpay-payment]
+verify_jwt = true
+
+# Razorpay cannot send a Supabase JWT; the request is authenticated by its HMAC signature instead.
+[functions.razorpay-webhook]
+verify_jwt = false

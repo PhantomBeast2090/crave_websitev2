@@ -118,18 +118,11 @@ DROP POLICY IF EXISTS "Users create order items"                   ON order_item
 DROP POLICY IF EXISTS "Users create order customizations"          ON order_item_customizations;
 DROP POLICY IF EXISTS "Users can cancel their own pending orders"  ON orders;
 
+-- NOTE (audit fix): the original WITH CHECK referenced NEW./OLD., which is not valid in a policy and made
+-- this whole migration fail. Column-level protection is enforced by the trigger in 018_security_hardening.sql.
 CREATE POLICY "Users can cancel their own pending orders" ON orders FOR UPDATE
 USING (auth.uid() = user_id AND status IN ('CREATED','PLACED'))
-WITH CHECK (
-    auth.uid() = user_id
-    AND NEW.status   = 'CANCELLED'
-    AND NEW.user_id   = OLD.user_id
-    AND NEW.vendor_id = OLD.vendor_id
-    AND NEW.outlet_id = OLD.outlet_id
-    AND NEW.subtotal  = OLD.subtotal
-    AND NEW.tax       = OLD.tax
-    AND NEW.total     = OLD.total
-);
+WITH CHECK (auth.uid() = user_id AND status = 'CANCELLED');
 
 -- SECTION 7: ORDER STATE MACHINE
 

@@ -15,13 +15,13 @@ BEGIN
     IF v_user_id IS NULL THEN RAISE EXCEPTION 'Authentication required.'; END IF;
 
     -- Verify admin role
-    SELECT role INTO v_role FROM users WHERE id = v_user_id;
+    SELECT role INTO v_role FROM profiles WHERE id = v_user_id;
     IF v_role != 'ADMIN' THEN RAISE EXCEPTION 'Unauthorized: Requires ADMIN role.'; END IF;
 
     -- Compute stats
     SELECT jsonb_build_object(
-        'totalUsers', (SELECT count(*) FROM users WHERE role = 'STUDENT'),
-        'totalVendors', (SELECT count(*) FROM users WHERE role = 'VENDOR'),
+        'totalUsers', (SELECT count(*) FROM profiles WHERE role = 'STUDENT'),
+        'totalVendors', (SELECT count(*) FROM profiles WHERE role = 'VENDOR'),
         'totalOutlets', (SELECT count(*) FROM outlets),
         'totalOrders', (SELECT count(*) FROM orders),
         'activeOrders', (SELECT count(*) FROM orders WHERE status IN ('PLACED', 'ACCEPTED', 'PREPARING', 'READY')),
@@ -45,7 +45,7 @@ BEGIN
     IF v_user_id IS NULL THEN RAISE EXCEPTION 'Authentication required.'; END IF;
 
     -- Verify admin role
-    SELECT role INTO v_role FROM users WHERE id = v_user_id;
+    SELECT role INTO v_role FROM profiles WHERE id = v_user_id;
     IF v_role != 'ADMIN' THEN RAISE EXCEPTION 'Unauthorized: Requires ADMIN role.'; END IF;
 
     -- Perform atomic update

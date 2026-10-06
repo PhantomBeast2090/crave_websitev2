@@ -1,63 +1,44 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
-import { HmacSha256 } from "https://deno.land/std@0.160.0/hash/sha256.ts";
+// Razorpay -> Crave asynchronous confirmation. Deployed with verify_jwt = false (Razorpay does not
+// send a Supabase JWT); authenticity comes from the HMAC over the raw body. Idempotent: duplicates,
+// retries and "webhook before browser verification" are all safe.
+import { serviceClient } from '../_shared/http.ts'
+import { decideWebhookAction, verifyWebhookSignature } from '../_shared/razorpay.ts'
 
-const WEBHOOK_SECRET = Deno.env.get('RAZORPAY_WEBHOOK_SECRET')
+Deno.serve(async (req) => {
+  if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 })
+  const secret = Deno.env.get('RAZORPAY_WEBHOOK_SECRET')
+  if (!secret) { console.error('[razorpay-webhook] RAZORPAY_WEBHOOK_SECRET is not set'); return new Response('Not configured', { status: 503 }) }
 
-serve(async (req) => {
-  const signature = req.headers.get('x-razorpay-signature')
-  const body = await req.text()
-
-  if (!signature || !WEBHOOK_SECRET) {
-      return new Response('Unauthorized', { status: 401 })
+  const rawBody = await req.text()
+  if (!(await verifyWebhookSignature(rawBody, req.headers.get('x-razorpay-signature'), secret))) {
+    console.warn('[razorpay-webhook] rejected: bad signature')
+    return new Response('Invalid signature', { status: 401 })
   }
 
-  // Verify Webhook Signature
-  const expectedSignature = new HmacSha256(WEBHOOK_SECRET)
-    .update(body)
-    .toString();
+  let payload: any
+  try { payload = JSON.parse(rawBody) } catch { return new Response('Bad payload', { status: 400 }) }
 
-  if (expectedSignature !== signature) {
-      return new Response('Invalid Signature', { status: 401 })
-  }
-
-  const payload = JSON.parse(body)
-  const event = payload.event
-  const payment = payload.payload.payment.entity
-  const razorpayOrderId = payment.order_id
-
-  const supabaseAdmin = createClient(
-    Deno.env.get('SUPABASE_URL') ?? '',
-    Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
-  )
-
+  const eventId = req.headers.get('x-razorpay-event-id') ?? `${payload?.event}:${payload?.payload?.payment?.entity?.id ?? payload?.created_at}`
+  const db = serviceClient()
   try {
-    // Map Razorpay events to our DB updates
-    if (event === 'payment.captured') {
-        const { data: payRecord } = await supabaseAdmin
-            .from('payments')
-            .select('order_id')
-            .eq('razorpay_order_id', razorpayOrderId)
-            .single()
-
-        if (payRecord) {
-            await supabaseAdmin.rpc('mark_payment_verified', {
-                p_order_id: payRecord.order_id,
-                p_razorpay_payment_id: payment.id,
-                p_razorpay_signature: 'webhook', // We verify webhook signature above
-                p_status: 'PAID'
-            })
-        }
-    } else if (event === 'payment.failed') {
-        await supabaseAdmin
-            .from('payments')
-            .update({ status: 'FAILED' })
-            .eq('razorpay_order_id', razorpayOrderId)
+    const decision = decideWebhookAction(payload)
+    if (decision.kind !== 'ignore') {
+      const applied = await db.rpc('crave_payment_apply', {
+        p_razorpay_order_id: decision.razorpayOrderId, p_razorpay_payment_id: decision.razorpayPaymentId,
+        p_status: decision.kind.toUpperCase(), p_amount_paise: decision.amountPaise, p_signature: null, p_expected_user: null,
+      })
+      // An order we do not know (e.g. created by another integration on this account) is acknowledged, not retried.
+      if (applied.error && !/Unknown Razorpay order/i.test(applied.error.message)) throw applied.error
     }
-
+    await db.from('payment_events').upsert({
+      provider_event_id: eventId, event_type: String(payload?.event ?? 'unknown'),
+      razorpay_order_id: payload?.payload?.payment?.entity?.order_id ?? null,
+      razorpay_payment_id: payload?.payload?.payment?.entity?.id ?? null,
+      payload: { event: payload?.event, created_at: payload?.created_at },
+    }, { onConflict: 'provider_event_id', ignoreDuplicates: true })
     return new Response('ok', { status: 200 })
-  } catch (error) {
-    console.error('Webhook processing error:', error)
-    return new Response('Internal Error', { status: 500 })
+  } catch (err) {
+    console.error('[razorpay-webhook] processing error', (err as Error)?.message)
+    return new Response('Retry', { status: 500 })   // Razorpay will redeliver
   }
 })

@@ -1,97 +1,40 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2"
+// Creates (or re-uses) the Razorpay order for one of the caller's unpaid ONLINE orders.
+// The amount ALWAYS comes from the database (payments.amount); the client never sends one.
+import { HttpError, json, readJson, requireUser, serviceClient, toResponse, corsHeaders } from '../_shared/http.ts'
+import { isUuid } from '../_shared/razorpay.ts'
 
-const RAZORPAY_KEY_ID = Deno.env.get('RAZORPAY_KEY_ID')
-const RAZORPAY_KEY_SECRET = Deno.env.get('RAZORPAY_KEY_SECRET')
-
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-}
-
-serve(async (req) => {
-  if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders })
-  }
-
+Deno.serve(async (req) => {
+  if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders(req) })
   try {
-    const supabaseClient = createClient(
-      Deno.env.get('SUPABASE_URL') ?? '',
-      Deno.env.get('SUPABASE_ANON_KEY') ?? '',
-      { global: { headers: { Authorization: req.headers.get('Authorization')! } } }
-    )
+    if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed.')
+    const keyId = Deno.env.get('RAZORPAY_KEY_ID'), keySecret = Deno.env.get('RAZORPAY_KEY_SECRET')
+    if (!keyId || !keySecret) { console.error('[create-razorpay-order] Razorpay keys are not configured'); throw new HttpError(503, 'Online payments are temporarily unavailable.') }
 
-    const { data: { user }, error: authError } = await supabaseClient.auth.getUser()
-    if (authError || !user) throw new Error('Unauthorized')
+    const user = await requireUser(req)
+    const { order_id } = await readJson(req)
+    if (!isUuid(order_id)) throw new HttpError(400, 'Invalid order.')
 
-    const { order_id } = await req.json()
-    if (!order_id) throw new Error('order_id is required')
+    const db = serviceClient()
+    const prep = await db.rpc('crave_payment_prepare', { p_order_id: order_id, p_user_id: user.id })
+    if (prep.error) throw prep.error
+    const { amount_paise, razorpay_order_id: existing, expires_at } = prep.data as { amount_paise: number; razorpay_order_id: string | null; expires_at: string | null }
 
-    // 1. Fetch internal payment record
-    // We join with orders to verify ownership via RLS
-    const { data: payment, error: payError } = await supabaseClient
-      .from('payments')
-      .select('*, orders!inner(user_id, status)')
-      .eq('order_id', order_id)
-      .single()
-
-    if (payError || !payment) throw new Error('Order/Payment not found or access denied')
-    if (payment.orders.user_id !== user.id) throw new Error('Unauthorized access to order')
-
-    // 2. Prepare Razorpay Order
-    // Amount must be in paise
-    const amountInPaise = Math.round(parseFloat(payment.amount) * 100)
-
-    const auth = btoa(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`)
-    const response = await fetch('https://api.razorpay.com/v1/orders', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Basic ${auth}`
-      },
-      body: JSON.stringify({
-        amount: amountInPaise,
-        currency: 'INR',
-        receipt: order_id,
-        notes: {
-            internal_order_id: order_id,
-            user_id: user.id
-        }
+    let razorpayOrderId = existing
+    if (!razorpayOrderId) {
+      const res = await fetch('https://api.razorpay.com/v1/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Basic ${btoa(`${keyId}:${keySecret}`)}` },
+        body: JSON.stringify({ amount: amount_paise, currency: 'INR', receipt: String(order_id).slice(0, 40), notes: { crave_order_id: order_id, crave_user_id: user.id } }),
+        signal: AbortSignal.timeout(15000),
       })
-    })
-
-    const rzpOrder = await response.json()
-    if (!rzpOrder.id) {
-        console.error('Razorpay Error:', rzpOrder)
-        throw new Error('Failed to create Razorpay order')
+      const created = await res.json().catch(() => ({}))
+      if (!res.ok || !created?.id) { console.error('[create-razorpay-order] Razorpay rejected order creation', res.status, JSON.stringify(created)); throw new HttpError(502, 'We could not start the payment. Please try again.') }
+      // Compare-and-set: if a parallel request won, we use ITS Razorpay order (the extra one is never paid).
+      const attached = await db.rpc('crave_payment_attach', { p_order_id: order_id, p_razorpay_order_id: created.id })
+      if (attached.error) throw attached.error
+      razorpayOrderId = attached.data as string
     }
 
-    // 3. Update payment record with Razorpay Order ID
-    const { error: updateError } = await supabaseClient
-      .from('payments')
-      .update({
-          razorpay_order_id: rzpOrder.id,
-          gateway_provider: 'RAZORPAY',
-          status: 'CREATED'
-      })
-      .eq('order_id', order_id)
-
-    if (updateError) throw updateError
-
-    return new Response(
-      JSON.stringify({
-        razorpay_order_id: rzpOrder.id,
-        amount: amountInPaise,
-        key_id: RAZORPAY_KEY_ID,
-        currency: 'INR'
-      }),
-      { headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
-    )
-
-  } catch (error) {
-    return new Response(JSON.stringify({ error: error.message }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      status: 400,
-    })
-  }
+    return json(req, { order_id, razorpay_order_id: razorpayOrderId, amount: amount_paise, currency: 'INR', key_id: keyId, expires_at })
+  } catch (err) { return toResponse(req, err, 'create-razorpay-order') }
 })

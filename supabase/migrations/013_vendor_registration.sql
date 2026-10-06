@@ -39,7 +39,7 @@ ON profiles
 FOR INSERT
 WITH CHECK (
     auth.uid() = id
-    AND role IN ('STUDENT', 'PENDING_VENDOR')
+    AND role::text IN ('STUDENT', 'PENDING_VENDOR')   -- ::text: a value added by ALTER TYPE cannot be used in the same transaction
 );
 
 -- No other changes required:
